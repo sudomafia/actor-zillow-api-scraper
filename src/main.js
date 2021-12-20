@@ -1,4 +1,6 @@
 const Apify = require('apify');
+const got = require('got');
+const {parseCSV} = require('csv-load-sync');
 const HeaderGenerator = require('header-generator');
 const _ = require('lodash');
 const { LABELS, TYPES, INITIAL_URL } = require('./constants');
@@ -32,8 +34,8 @@ Apify.main(async () => {
     const isDebug = input.debugLog === true;
 
     // Check input
-    if (!(input.search && input.search.trim().length > 0) && !input.startUrls && !input.zpids) {
-        throw new Error('Either "search", "startUrls" or "zpids" attribute has to be set!');
+    if (!(input.search && input.search.trim().length > 0) && !input.startUrls && !input.zpids && !input.propertyUrls) {
+        throw new Error('Either "search", "startUrls", "propertyUrls" or "zpids" attribute has to be set!');
     }
 
     const proxyConfig = await proxyConfiguration({
@@ -170,6 +172,29 @@ Apify.main(async () => {
             Check if your start urls match the desired home status.`);
         }
 
+        const parsingUrl = input.startUrls[0].requestsFromUrl;
+        let records;
+        if (parsingUrl){
+            const { body: csv } = await got(parsingUrl);
+            records = parseCSV(csv);
+
+            let address = "";
+            let url = "";
+            input.startUrls = []
+
+            records.forEach(function (row, index) {
+                address = [row['STREET_NUMBER'] + row['STREET_NAME'], row['CITY'], row['STATE'],row['ZIP_CODE']].join(',')
+                url = "https://www.zillow.com/homes/" + address.replace(' ', '-') + '_rb/'
+                input.startUrls.push({
+                    url: url,
+                    id: row['ID'],
+                    userData: {
+                        eid: row['ID']
+                    }
+                });
+            });
+        }
+
         const requestList = await Apify.openRequestList('STARTURLS', input.startUrls);
 
         let req;
@@ -178,9 +203,11 @@ Apify.main(async () => {
                 throw new Error(`Invalid startUrl ${req.url}`);
             }
 
+            const urlData = getUrlData(req.url);
+            urlData.eid = req.id;
             startUrls.push({
                 url: req.url,
-                userData: getUrlData(req.url),
+                userData: urlData,
             });
         }
     }
@@ -462,7 +489,7 @@ Apify.main(async () => {
              * @param {string} zpid
              * @param {string} detailUrl
              */
-            const processZpid = async (zpid, detailUrl) => {
+            const processZpid = async (zpid, detailUrl, eid) => {
                 if (isOverItems()) {
                     return;
                 }
@@ -492,6 +519,7 @@ Apify.main(async () => {
                             request,
                             page,
                             zpid,
+                            eid,
                         },
                     );
                 } catch (e) {
@@ -509,6 +537,7 @@ Apify.main(async () => {
                         userData: {
                             label: LABELS.DETAIL,
                             zpid: +zpid,
+                            eid: eid
                         },
                     }, { forefront: true });
                 } finally {
@@ -520,7 +549,7 @@ Apify.main(async () => {
 
             if (label === LABELS.INITIAL || !queryZpid) {
                 try {
-                    log.info('Trying to get queryId...');
+                    log.info('Trying to get queryId ...');
 
                     const { queryId, clientVersion } = await interceptQueryId(page, proxyInfo);
 
@@ -596,7 +625,7 @@ Apify.main(async () => {
                     throw new Error('Failed to load preloaded data scripts');
                 }
 
-                log.info(`Extracting data from ${request.url}`);
+                log.info(`LABELS.DETAIL Extracting data from ${request.url}`);
                 let noScriptsFound = true;
 
                 for (const script of scripts) {
@@ -609,6 +638,7 @@ Apify.main(async () => {
                                     request,
                                     page,
                                     zpid: request.userData.zpid,
+                                    eid: request.userData.eid,
                                 });
 
                                 noScriptsFound = false;
@@ -632,13 +662,13 @@ Apify.main(async () => {
                 log.info(`Scraping ${input.zpids.length} zpids`);
 
                 for (const zpid of input.zpids) {
-                    await processZpid(zpid, '');
+                    await processZpid(zpid, '', '');
 
                     if (isOverItems()) {
                         break;
                     }
                 }
-            } else if (label === LABELS.QUERY || label === LABELS.SEARCH) {
+            } else if ((label === LABELS.QUERY || label === LABELS.SEARCH) && request.userData.term) {
                 if (label === LABELS.SEARCH) {
                     log.info(`Searching for "${request.userData.term}"`);
 
@@ -871,6 +901,49 @@ Apify.main(async () => {
                         }
                     }
                 }
+            } else {
+                log.info(`LABELS Extracting data from ${page.url()}`);
+
+                await page.waitForFunction('document.location.href.includes("zpid")', { timeout: 20000 });
+
+                const splitUrl = page.url().split('_rb/')[1];
+
+                if (splitUrl) {
+                    const zpid = splitUrl.split('_z')[0];
+
+                    if (zpid) {
+                        log.info(`zpid from ${zpid}`);
+                        await processZpid(zpid, '', request.userData.eid);
+                    } else {
+                        const totalAmount = await page.evaluate(() => document.querySelectorAll(".unit-card-grid.unit-card").length )
+                        if (totalAmount > 0) {
+                            const zpidQuery = await page.evaluate(() => document.querySelectorAll(".unit-card-grid.unit-card")[0].getAttribute("data-test-id") )
+                            if (zpidQuery) {
+                                log.info(`zpid from ${zpidQuery}`);
+                                await processZpid(zpidQuery, '', request.userData.eid);
+                            } else {
+                                throw new Error('zpid could not be retrieved');
+                            }
+                        } else {
+                            throw new Error('zpid could not be retrieved');
+                        }
+                    }
+                } else {
+                    let zpid;
+
+                    const totalAmount = await page.evaluate(() => document.querySelectorAll(".unit-card-grid.unit-card").length )
+                    if (totalAmount > 0) {
+                        zpid = await page.evaluate(() => document.querySelectorAll(".unit-card-grid.unit-card")[0].getAttribute("data-test-id") )
+                        if (zpid) {
+                            log.info(`zpid from ${zpid}`);
+                            await processZpid(zpid, '', request.userData.eid);
+                        } else {
+                            throw new Error('zpid could not be retrieved');
+                        }
+                    } else {
+                        throw new Error('zpid could not be retrieved');
+                    }
+                }
             }
 
             await extendScraperFunction(undefined, {
@@ -890,6 +963,7 @@ Apify.main(async () => {
         handleFailedRequestFunction: async ({ request, error }) => {
             // This function is called when the crawling of a request failed too many times
             log.exception(error, `\n\nRequest ${request.url} failed too many times.\n\n`);
+            await Apify.pushData({id: request.userData.eid, error: 'It was not possible to get a ZPID and their data for given address'});
         },
     });
 

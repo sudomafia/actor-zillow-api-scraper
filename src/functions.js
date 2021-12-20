@@ -476,6 +476,7 @@ const getUrlData = (url) => {
     return {
         label,
         term: label === LABELS.SEARCH ? nUrl.pathname.split('/', 2).filter((s) => s)[0] : undefined,
+        eid: undefined,
     };
 };
 

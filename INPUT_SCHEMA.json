@@ -126,6 +126,12 @@
             "default": false,
             "type": "boolean",
             "editor": "checkbox"
+        },
+        "propertyUrls": {
+            "title": "Property URLs",
+            "type": "array",
+            "editor": "json",
+            "description": "List of Property URLs that will be scraped."
         }
     }
 }
