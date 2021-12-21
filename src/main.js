@@ -183,7 +183,7 @@ Apify.main(async () => {
             input.startUrls = []
 
             records.forEach(function (row, index) {
-                address = [row['STREET_NUMBER'] + row['STREET_NAME'], row['CITY'], row['STATE'],row['ZIP_CODE']].join(',')
+                address = [row['STREET_NUMBER'] + ' ' + row['STREET_NAME'], row['CITY'], row['STATE'],row['ZIP_CODE']].join(',')
                 url = "https://www.zillow.com/homes/" + address.replace(' ', '-') + '_rb/'
                 input.startUrls.push({
                     url: url,
