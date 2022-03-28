@@ -147,11 +147,12 @@ Apify.main(async () => {
     });
 
     const requestQueue = await Apify.openRequestQueue();
+    let requestList;
 
     /**
      * @type {Apify.RequestOptions[]}
      */
-    const startUrls = [];
+    let startUrls = [];
 
     if (input.search && input.search.trim()) {
         const term = input.search.trim();
@@ -166,7 +167,7 @@ Apify.main(async () => {
         });
     }
 
-    if (input.startUrls && input.startUrls.length) {
+    if (input.startUrls && input.startUrls.length && input.startUrls[0].requestsFromUrl) {
         if (input.type) {
             log.warning(`Input type "${input.type}" will be ignored as the value is derived from start url.
             Check if your start urls match the desired home status.`);
@@ -185,32 +186,31 @@ Apify.main(async () => {
             records.forEach(function (row, index) {
                 address = [row['STREET_NUMBER'] + ' ' + row['STREET_NAME'], row['CITY'], row['STATE'],row['ZIP_CODE']].join(',')
                 url = "https://www.zillow.com/homes/" + address.replace(' ', '-') + '_rb/'
-                input.startUrls.push({
+
+                const urlData = getUrlData(url);
+                urlData.eid = row['ID'];
+                startUrls.push({
                     url: url,
-                    id: row['ID'],
-                    userData: {
-                        eid: row['ID']
-                    }
+                    userData: urlData,
                 });
             });
         }
+    }else{
+        input.startUrls.forEach(function (row, index) {
+            const urlData = getUrlData(row.url);
+            urlData.eid = row.id;
 
-        const requestList = await Apify.openRequestList('STARTURLS', input.startUrls);
-
-        let req;
-        while (req = await requestList.fetchNextRequest()) { // eslint-disable-line no-cond-assign
-            if (!req.url.includes('zillow.com')) {
-                throw new Error(`Invalid startUrl ${req.url}`);
-            }
-
-            const urlData = getUrlData(req.url);
-            urlData.eid = req.id;
             startUrls.push({
-                url: req.url,
+                url: row.url,
                 userData: urlData,
             });
-        }
+        });
+
+        input.startUrls = [];
     }
+
+    requestList = await Apify.openRequestList('STARTURLS', startUrls);
+
 
     if (input.zpids && input.zpids.length) {
         startUrls.push({
@@ -351,6 +351,7 @@ Apify.main(async () => {
     // Create crawler
     const crawler = new Apify.PuppeteerCrawler({
         requestQueue,
+        requestList,
         maxRequestRetries: input.maxRetries || 20,
         handlePageTimeoutSecs: !queryZpid
             ? 120
@@ -566,11 +567,6 @@ Apify.main(async () => {
                         await Apify.setValue('QUERY', { queryId, clientVersion });
 
                         autoscaledPool.maxConcurrency = 10;
-
-                        // now that we initialized, we can add the requests
-                        for (const req of startUrls) {
-                            await requestQueue.addRequest(req);
-                        }
 
                         log.info('Got queryId, continuing...');
                     }
@@ -922,6 +918,7 @@ Apify.main(async () => {
                                 log.info(`zpid from ${zpidQuery}`);
                                 await processZpid(zpidQuery, '', request.userData.eid);
                             } else {
+                                await Apify.pushData({id: request.userData.eid, error: 'It was not possible to get a ZPID and their data for given address', url: request.url});
                                 throw new Error('zpid could not be retrieved');
                             }
                         } else {
@@ -963,7 +960,7 @@ Apify.main(async () => {
         handleFailedRequestFunction: async ({ request, error }) => {
             // This function is called when the crawling of a request failed too many times
             log.exception(error, `\n\nRequest ${request.url} failed too many times.\n\n`);
-            await Apify.pushData({id: request.userData.eid, error: 'It was not possible to get a ZPID and their data for given address'});
+            await Apify.pushData({id: request.userData.eid, error: 'It was not possible to get a ZPID and their data for given address', url: request.url});
         },
     });
 
